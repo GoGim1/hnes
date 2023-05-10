@@ -1,8 +1,7 @@
 module Main where
 
-import Emulator
 import Control.Monad.State
+import Emulator
 
 main :: IO ()
 main = evalStateT run initEmulator
-

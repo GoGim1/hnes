@@ -1,6 +1,6 @@
-module Utils where 
+module Utils where
 
-import Data.Word 
+import Data.Word
 import Text.Printf
 
 word8ToInt :: Word8 -> Int
