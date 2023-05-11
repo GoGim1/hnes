@@ -14,3 +14,6 @@ showHex = printf "0x%04x"
 
 showHexWord8 :: Word8 -> String
 showHexWord8 = printf "0x%02x"
+
+showBinaryWord8 :: Word8 -> String
+showBinaryWord8 = printf "0b%08b"

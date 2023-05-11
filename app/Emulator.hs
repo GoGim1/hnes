@@ -6,26 +6,57 @@ module Emulator where
 import Cartridge
 import Control.Lens
 import Control.Monad.State
-import qualified Cpu
-import Data.Bits
 import Data.Sequence as Seq
 import Data.Word
-import Mapper
 import Utils
+
+type Address = Word16
+
+-- https://www.nesdev.org/wiki/CPU_registers
+data Cpu = Cpu
+  { _accumulator :: Word8,
+    _indexX :: Word8,
+    _indexY :: Word8,
+    _programCounter :: Address,
+    _stackPointer :: Word8,
+    _status :: Word8
+  }
+
+makeLenses ''Cpu
+
+instance Show Cpu where
+  show (Cpu a x y pc sp p) =
+    unlines
+      [ "accumulator: " ++ showHexWord8 a,
+        "indexX: " ++ showHexWord8 x,
+        "indexY: " ++ showHexWord8 y,
+        "programCounter: " ++ showHex pc,
+        "stackPointer: " ++ showHexWord8 sp,
+        "status: " ++ showBinaryWord8 p
+      ]
+
+type Ram = Seq Word8
 
 data Emulator = Emulator
   { _cartridge :: Cartridge,
-    _cpu :: Cpu.Cpu,
-    _ram :: Cpu.Ram
+    _cpu :: Cpu,
+    _ram :: Ram
   }
   deriving (Show)
 
 makeLenses ''Emulator
 
-type EmulatorState = StateT Emulator IO
+-- https://www.nesdev.org/wiki/CPU_power_up_state
+initCpu :: Cpu
+initCpu = Cpu 0 0 0 0 0xfd 0x34
+
+initRam :: Ram
+initRam = Seq.replicate 0x800 0
 
 initEmulator :: Emulator
-initEmulator = Emulator emptyCartridge Cpu.initCpu Cpu.initRam
+initEmulator = Emulator emptyCartridge initCpu initRam
+
+type EmulatorState = StateT Emulator IO
 
 readRam :: Word16 -> EmulatorState Word8
 readRam a = do
@@ -39,52 +70,3 @@ readPrgRom :: Word16 -> EmulatorState Word8
 readPrgRom a = do
   r <- use $ cartridge . prgRom
   return . Seq.index r . word16ToInt $ a
-
--- https://www.nesdev.org/wiki/CPU_memory_map
-cpuRead :: Word16 -> EmulatorState Word8
-cpuRead a =
-  if
-      | a >= 0 && a < 0x2000 -> readRam (a .&. 0x7ff) -- internal ram
-      | a >= 0x2000 && a < 0x4000 -> undefined -- ppu register
-      | a >= 0x4000 && a < 0x4018 -> undefined -- apu and io register
-      | a >= 0x4018 && a < 0x4020 -> undefined -- normally disabled
-      | a >= 0x4020 && a <= 0xffff -> do
-          mt <- getMapperType <$> use (cartridge . header . mapperNumber)
-          cpuRead' mt a
-      | otherwise -> error $ "handle addr " ++ show a
-
--- https://www.nesdev.org/wiki/NROM
-cpuRead' :: MapperType -> Word16 -> EmulatorState Word8
-cpuRead' Mapper000 a = do
-  prgRomMask <- gets $ subtract 1 . view (cartridge . header . prgRomSize)
-  let prgRomAddr = (a - 0x8000) .&. fromIntegral prgRomMask
-  if
-      | a >= 0x6000 && a < 0x8000 -> undefined -- Family Basic only
-      | a >= 0x8000 && a <= 0xffff -> readPrgRom prgRomAddr
-      | otherwise -> error $ "handle addr " ++ show a
-
-cpuReadWord16 :: Word16 -> EmulatorState Word16
-cpuReadWord16 a = do
-  low <- fromIntegral <$> cpuRead a
-  high <- fromIntegral <$> cpuRead (a + 1)
-  return $ (high `shiftL` 8) .|. low
-
--- https://www.nesdev.org/wiki/CPU_power_up_state#After_reset
-reset :: EmulatorState ()
-reset = do
-  (cpu . Cpu.stackPointer) %= subtract 3
-  cpu %= Cpu.setI
-  addr <- cpuReadWord16 Cpu.resetAddr
-  (cpu . Cpu.programCounter) .= addr
-
-step :: EmulatorState ()
-step = do
-  ins <- use (cpu . Cpu.programCounter) >>= cpuRead
-  lift . print . showHexWord8 $ ins
-
-run :: EmulatorState ()
-run = do
-  c <- lift $ readCartridge "roms/mario.nes"
-  cartridge .= c
-  reset
-  forM_ [0 ..] (const step)

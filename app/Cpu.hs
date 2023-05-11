@@ -1,47 +1,16 @@
 {-# LANGUAGE BinaryLiterals #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE MultiWayIf #-}
 
 module Cpu where
 
+import Cartridge
 import Control.Lens
+import Control.Monad.State
 import Data.Bits
-import Data.Sequence
 import Data.Word
-import Text.Printf
+import Emulator
+import Mapper
 import Utils
-
-type Address = Word16
-
--- https://www.nesdev.org/wiki/CPU_registers
-data Cpu = Cpu
-  { _accumulator :: Word8,
-    _indexX :: Word8,
-    _indexY :: Word8,
-    _programCounter :: Address,
-    _stackPointer :: Word8,
-    _status :: Word8
-  }
-
-makeLenses ''Cpu
-
-instance Show Cpu where
-  show c@(Cpu a x y pc sp p) =
-    unlines
-      [ "accumulator: " ++ showHexWord8 a,
-        "indexX: " ++ showHexWord8 x,
-        "indexY: " ++ showHexWord8 y,
-        "programCounter: " ++ showHex pc,
-        "stackPointer: " ++ showHexWord8 sp,
-        "status: " ++ showHexWord8 p,
-        printf
-          "C: %s, Z: %s, I: %s, D: %s, V: %s, N: %s"
-          (show $ cFlag c)
-          (show $ zFlag c)
-          (show $ iFlag c)
-          (show $ dFlag c)
-          (show $ vFlag c)
-          (show $ nFlag c)
-      ]
 
 -- https://www.nesdev.org/wiki/CPU_interrupts#Interrupt_hijacking
 nmiAddr :: Address
@@ -55,10 +24,6 @@ irqAddr = 0xfffe
 
 brkAddr :: Address
 brkAddr = 0xfffe
-
--- https://www.nesdev.org/wiki/CPU_power_up_state
-initCpu :: Cpu
-initCpu = Cpu 0 0 0 0 0xfd 0x34
 
 -- https://www.nesdev.org/wiki/Status_flags
 setC :: Cpu -> Cpu
@@ -115,11 +80,6 @@ vFlag c = testBit (c ^. status) 6
 nFlag :: Cpu -> Bool
 nFlag c = testBit (c ^. status) 7
 
-type Ram = Seq Word8
-
-initRam :: Ram
-initRam = Data.Sequence.replicate 0x800 0
-
 -- https://www.nesdev.org/obelisk-6502-guide/addressing.html
 data AdressingMode
   = Implicit
@@ -133,3 +93,50 @@ data AdressingMode
   | AbsoluteX
   | AbsoluteY
   | Indirect
+
+-- https://www.nesdev.org/wiki/CPU_memory_map
+cpuRead :: Word16 -> EmulatorState Word8
+cpuRead a =
+  if
+      | a >= 0 && a < 0x2000 -> readRam (a .&. 0x7ff) -- internal ram
+      | a >= 0x2000 && a < 0x4000 -> undefined -- ppu register
+      | a >= 0x4000 && a < 0x4018 -> undefined -- apu and io register
+      | a >= 0x4018 && a < 0x4020 -> undefined -- normally disabled
+      | a >= 0x4020 && a <= 0xffff -> do
+          mt <- getMapperType <$> use (cartridge . header . mapperNumber)
+          cpuRead' mt a
+      | otherwise -> error $ "handle addr " ++ show a
+
+-- https://www.nesdev.org/wiki/NROM
+cpuRead' :: MapperType -> Word16 -> EmulatorState Word8
+cpuRead' Mapper000 a = do
+  prgRomMask <- gets $ subtract 1 . view (cartridge . header . prgRomSize)
+  let prgRomAddr = (a - 0x8000) .&. fromIntegral prgRomMask
+  if
+      | a >= 0x6000 && a < 0x8000 -> undefined -- Family Basic only
+      | a >= 0x8000 && a <= 0xffff -> readPrgRom prgRomAddr
+      | otherwise -> error $ "handle addr " ++ show a
+
+cpuReadWord16 :: Word16 -> EmulatorState Word16
+cpuReadWord16 a = do
+  low <- fromIntegral <$> cpuRead a
+  high <- fromIntegral <$> cpuRead (a + 1)
+  return $ (high `shiftL` 8) .|. low
+
+-- https://www.nesdev.org/wiki/CPU_power_up_state#After_reset
+reset :: EmulatorState ()
+reset = do
+  (cpu . stackPointer) %= subtract 3
+  cpu %= setI
+  addr <- cpuReadWord16 resetAddr
+  (cpu . programCounter) .= addr
+
+step :: EmulatorState ()
+step = do
+  ins <- use (cpu . programCounter) >>= cpuRead
+  lift . print . showHexWord8 $ ins
+
+run :: EmulatorState ()
+run = do
+  reset
+  forM_ [0 ..] (const step)
